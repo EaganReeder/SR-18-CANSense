@@ -48,7 +48,10 @@ FDCAN_HandleTypeDef hfdcan2;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+uint16_t adc_value;
 
+FDCAN_TxHeaderTypeDef tx_header;
+uint8_t tx_data[2];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -105,13 +108,40 @@ int main(void)
   MX_FDCAN2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+{
+  Error_Handler();
+}
 
+tx_header.Identifier = 0x100;
+tx_header.IdType = FDCAN_STANDARD_ID;
+tx_header.TxFrameType = FDCAN_DATA_FRAME;
+tx_header.DataLength = FDCAN_DLC_BYTES_2;
+tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+tx_header.BitRateSwitch = FDCAN_BRS_OFF;
+tx_header.FDFormat = FDCAN_CLASSIC_CAN;
+tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+tx_header.MessageMarker = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
+  {HAL_ADC_Start(&hadc1);
+HAL_ADC_PollForConversion(&hadc1, 100);
+
+adc_value = HAL_ADC_GetValue(&hadc1);
+
+HAL_ADC_Stop(&hadc1);
+
+tx_data[0] = adc_value & 0xFF;
+tx_data[1] = (adc_value >> 8) & 0xFF;
+
+HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_header, tx_data);
+
+HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_12);
+
+HAL_Delay(100);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -287,7 +317,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
   hfdcan1.Init.TxEventsNbr = 0;
   hfdcan1.Init.TxBuffersNbr = 0;
-  hfdcan1.Init.TxFifoQueueElmtsNbr = 0;
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 1;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
