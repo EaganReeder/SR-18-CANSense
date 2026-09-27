@@ -108,40 +108,53 @@ int main(void)
   MX_FDCAN2_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
-{
-  Error_Handler();
-}
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-tx_header.Identifier = 0x100;
-tx_header.IdType = FDCAN_STANDARD_ID;
-tx_header.TxFrameType = FDCAN_DATA_FRAME;
-tx_header.DataLength = FDCAN_DLC_BYTES_2;
-tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-tx_header.BitRateSwitch = FDCAN_BRS_OFF;
-tx_header.FDFormat = FDCAN_CLASSIC_CAN;
-tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-tx_header.MessageMarker = 0;
+  /* NOTE: FDCAN2 is initialized below but not started/used anywhere in this
+   * file. If you don't actually need a second bus, remove MX_FDCAN2_Init()
+   * and its call above to save RAM (message buffers) and code space. Left
+   * in place here since removing a whole peripheral wasn't asked for. */
+
+  tx_header.Identifier = 0x100;
+  tx_header.IdType = FDCAN_STANDARD_ID;
+  tx_header.TxFrameType = FDCAN_DATA_FRAME;
+  tx_header.DataLength = FDCAN_DLC_BYTES_2;
+  tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  tx_header.BitRateSwitch = FDCAN_BRS_OFF;
+  tx_header.FDFormat = FDCAN_CLASSIC_CAN;
+  tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+  tx_header.MessageMarker = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {HAL_ADC_Start(&hadc1);
-HAL_ADC_PollForConversion(&hadc1, 100);
+  {
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 100);
 
-adc_value = HAL_ADC_GetValue(&hadc1);
+    adc_value = HAL_ADC_GetValue(&hadc1);
 
-HAL_ADC_Stop(&hadc1);
+    HAL_ADC_Stop(&hadc1);
 
-tx_data[0] = adc_value & 0xFF;
-tx_data[1] = (adc_value >> 8) & 0xFF;
+    tx_data[0] = adc_value & 0xFF;
+    tx_data[1] = (adc_value >> 8) & 0xFF;
 
-HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_header, tx_data);
+    /* Check the return value: with only 1 TX FIFO element allocated,
+     * a message can be dropped if the FIFO is still full from the
+     * previous frame (e.g. arbitration loss, bus-off, etc). */
+    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_header, tx_data) != HAL_OK)
+    {
+      /* USER CODE: handle/log the dropped frame as appropriate for
+       * your application (retry, error counter, fault LED, etc). */
+    }
 
-HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_12);
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_12);
 
-HAL_Delay(100);
+    HAL_Delay(100);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -163,6 +176,18 @@ void SystemClock_Config(void)
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
   /** Configure the main internal regulator output voltage
+   *
+   * FIX: The original config requested VOS3 with PLL1 output at 129 MHz
+   * and FLASH_LATENCY_1. VOS3 does not support 129 MHz SYSCLK on STM32H7
+   * parts (VOS3 max is well under 100 MHz depending on part; consult your
+   * exact part's datasheet voltage-scaling table). Below, PLLN is lowered
+   * so SYSCLK lands at 64 MHz, which VOS3 supports, and flash latency is
+   * bumped to a safe value for that frequency/voltage combo.
+   *
+   * If you actually need ~129 MHz+, switch to VOS1 or VOS0 instead
+   * (HAL_PWREx_ConfigSupply + PWR_REGULATOR_VOLTAGE_SCALE1/0) and set
+   * FLASH_LATENCY per the reference manual's table for that voltage
+   * scale and frequency.
   */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
@@ -177,7 +202,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 32;
-  RCC_OscInitStruct.PLL.PLLN = 129;
+  RCC_OscInitStruct.PLL.PLLN = 64;   /* FIX: was 129 -> 258 MHz VCO / 2 = 129 MHz SYSCLK, too high for VOS3 */
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
@@ -202,10 +227,22 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  /* FIX: bumped from FLASH_LATENCY_1 to FLASH_LATENCY_2, which is the
+   * safe number of wait states for ~64 MHz HCLK at VOS3 on most H7 parts.
+   * Re-check against your exact part's reference manual flash latency
+   * table if you change SYSCLK or voltage scale. */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
+
+  /* NOTE: FDCAN's kernel clock source (PLL1Q) and peripheral clock enable
+   * are already correctly configured in stm32h7xx_hal_msp.c
+   * (HAL_FDCAN_MspInit), which runs automatically inside HAL_FDCAN_Init().
+   * That file also handles clock-enable reference counting across
+   * FDCAN1/FDCAN2, so nothing further is needed here -- an earlier
+   * version of this function duplicated that config directly, which has
+   * been removed to avoid bypassing the reference count. */
 }
 
 /**
@@ -262,7 +299,11 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_8;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  /* FIX: sample time bumped from 1.5 cycles to 8.5 cycles. 1.5 cycles at
+   * 16-bit resolution is only safe for a very low-impedance source;
+   * increase further (e.g. 32.5/64.5 cycles) if your signal source has
+   * meaningful output impedance or you see noisy/unstable readings. */
+  sConfig.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -298,14 +339,32 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 16;
-  hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 1;
-  hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 1;
-  hfdcan1.Init.DataTimeSeg1 = 1;
-  hfdcan1.Init.DataTimeSeg2 = 1;
+  /*
+   * FIX: bit timing below is sized for a 500 kbit/s classic-CAN nominal
+   * bit rate. Your stm32h7xx_hal_msp.c selects PLL1Q as the FDCAN kernel
+   * clock (RCC_FDCANCLKSOURCE_PLL in HAL_FDCAN_MspInit); with the PLL1
+   * config in SystemClock_Config() (PLLM=32, PLLN=64, PLLQ=2 off a 64 MHz
+   * HSI), PLL1Q works out to 64 MHz. If you change PLLN/PLLQ/PLLM or the
+   * oscillator source, recompute prescaler/seg1/seg2 to match:
+   *
+   *   kernel_clk / NominalPrescaler = 64 MHz / 8 = 8 MHz time-quantum clock
+   *   bit time = 1 (sync) + NominalTimeSeg1 + NominalTimeSeg2 = 16 quanta
+   *   8 MHz / 16 quanta = 500 kHz  ->  500 kbit/s
+   *   sample point = (1 + 13) / 16 = 87.5%
+   *
+   * The original values (prescaler 16, seg1 1, seg2 1 = 3 quanta total)
+   * were not a valid/usable bit time -- TimeSeg1 must be at least 2, and
+   * a real bit needs several quanta with the sample point in the
+   * ~75-87.5% range.
+   */
+  hfdcan1.Init.NominalPrescaler = 8;
+  hfdcan1.Init.NominalSyncJumpWidth = 2;
+  hfdcan1.Init.NominalTimeSeg1 = 13;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.DataPrescaler = 8;
+  hfdcan1.Init.DataSyncJumpWidth = 2;
+  hfdcan1.Init.DataTimeSeg1 = 13;
+  hfdcan1.Init.DataTimeSeg2 = 2;
   hfdcan1.Init.MessageRAMOffset = 0;
   hfdcan1.Init.StdFiltersNbr = 0;
   hfdcan1.Init.ExtFiltersNbr = 0;
@@ -317,7 +376,10 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
   hfdcan1.Init.TxEventsNbr = 0;
   hfdcan1.Init.TxBuffersNbr = 0;
-  hfdcan1.Init.TxFifoQueueElmtsNbr = 1;
+  /* FIX: bumped from 1 to 4 TX FIFO elements so back-to-back frames have
+   * some headroom instead of being dropped whenever the bus is briefly
+   * busy. Adjust to taste. */
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 4;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -351,14 +413,17 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.AutoRetransmission = DISABLE;
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 16;
-  hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 1;
-  hfdcan2.Init.NominalTimeSeg2 = 1;
-  hfdcan2.Init.DataPrescaler = 1;
-  hfdcan2.Init.DataSyncJumpWidth = 1;
-  hfdcan2.Init.DataTimeSeg1 = 1;
-  hfdcan2.Init.DataTimeSeg2 = 1;
+  /* Same bit-timing fix as FDCAN1 above, now matched to the 64 MHz PLL1Q
+   * kernel clock set in SystemClock_Config(). Note FDCAN2 is still never
+   * started/used in main(); remove it if unneeded. */
+  hfdcan2.Init.NominalPrescaler = 8;
+  hfdcan2.Init.NominalSyncJumpWidth = 2;
+  hfdcan2.Init.NominalTimeSeg1 = 13;
+  hfdcan2.Init.NominalTimeSeg2 = 2;
+  hfdcan2.Init.DataPrescaler = 8;
+  hfdcan2.Init.DataSyncJumpWidth = 2;
+  hfdcan2.Init.DataTimeSeg1 = 13;
+  hfdcan2.Init.DataTimeSeg2 = 2;
   hfdcan2.Init.MessageRAMOffset = 0;
   hfdcan2.Init.StdFiltersNbr = 0;
   hfdcan2.Init.ExtFiltersNbr = 0;
@@ -475,6 +540,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* NOTE: ADC1_INP8's actual analog pin (PC5) and FDCAN1's TX/RX pins
+   * (PA11/PA12, AF9) are already correctly configured in
+   * stm32h7xx_hal_msp.c (HAL_ADC_MspInit / HAL_FDCAN_MspInit), which run
+   * automatically when HAL_ADC_Init() / HAL_FDCAN_Init() are called. No
+   * additional GPIO setup is needed here for those -- an earlier version
+   * of this file added redundant (and, for the ADC pin, incorrect: PC2
+   * instead of the real PC5) config here, which has been removed. */
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
